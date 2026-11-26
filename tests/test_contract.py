@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 from sklearn.metrics import r2_score
 
-from src.config import LAG_WARMUP, TARGET
+from src.config import FEATURE_SOURCES, FORBIDDEN, LAG_WARMUP, RAW, TARGET
 from src.features import build_features, feature_columns, reindex_to_calendar
 from src.ingest import load_raw
 from src.train import MODELS, temporal_split
@@ -42,6 +42,22 @@ def test_only_expected_rows_are_dropped(raw, feats):
     allowed_loss = LAG_WARMUP + LAG_WARMUP * missing_days
     lost = len(raw) - len(feats)
     assert lost <= allowed_loss, f"lost {lost} rows; expected at most {allowed_loss}"
+
+
+def test_every_raw_column_is_classified():
+    """feature_columns() is a denylist, so a new numeric column in the raw
+    CSV would reach the model without anyone deciding it should. Every raw
+    column must be FORBIDDEN (with a reason in src/config.py), a declared
+    FEATURE_SOURCE, or `dteday`. Reads the file directly, not load_raw(),
+    so nothing upstream can filter a column out before it is checked."""
+    columns = set(pd.read_csv(RAW, nrows=0).columns)
+    unclassified = columns - FORBIDDEN - FEATURE_SOURCES - {"dteday"}
+    assert not unclassified, (
+        f"unclassified raw columns {sorted(unclassified)}: add each to "
+        "FORBIDDEN (with its reason) or FEATURE_SOURCES in src/config.py"
+    )
+    stale = FEATURE_SOURCES - columns
+    assert not stale, f"FEATURE_SOURCES names columns not in the raw CSV: {sorted(stale)}"
 
 
 def test_beats_the_mean_baseline(feats):

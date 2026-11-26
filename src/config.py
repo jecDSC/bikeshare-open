@@ -42,8 +42,21 @@ TIME_INDEX_COLS = {"instant", "yr", "days_since_2011"}
 #    build our own lags from the target and test those instead.
 UNVERIFIED_COLS = {"cnt_2d_bfr"}
 
+# 4. Redundant: text restatements of dteday. src/features.py derives the
+#    calendar (month_sin/cos, dayofweek) from dteday itself, so these add
+#    nothing -- and excluding them by name keeps them out even if someone
+#    later gives them a numeric encoding.
+REDUNDANT_COLS = {"season", "mnth", "weekday"}
+
 # What feature_columns() and the tests actually enforce.
-FORBIDDEN = LEAKAGE_COLS | TIME_INDEX_COLS | UNVERIFIED_COLS
+FORBIDDEN = LEAKAGE_COLS | TIME_INDEX_COLS | UNVERIFIED_COLS | REDUNDANT_COLS
+
+# Raw columns the features are built from: used as-is (temp .. windspeed)
+# or encoded (holiday, workday, weather). Declared by hand ON PURPOSE: if
+# it were derived from feature_columns(), a new numeric column in the raw
+# CSV would classify itself as a feature. tests/test_contract.py requires
+# every raw column to be in FORBIDDEN, here, or be `dteday`.
+FEATURE_SOURCES = {"temp", "atemp", "hum", "windspeed", "holiday", "workday", "weather"}
 
 # Temporal split: train on 2011, validate on H1 2012, test on H2 2012.
 TRAIN_END = "2011-12-31"
