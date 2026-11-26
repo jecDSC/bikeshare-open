@@ -811,3 +811,46 @@ $ git status --short data/   (empty = untouched)
 passed every test. Proposed (not written): make `test_lags_are_true_calendar_lags`
 compare against the raw calendar (`load_raw()`), not the feature table, so
 2011-03-11 must be either dropped or correct.
+
+## 6. Tightening the three tests the faults exposed
+
+Faults 2 and 5 and the Exercise 1 coupling showed three tests that could
+pass while the thing they guard was wrong: `test_lags_are_true_calendar_lags`
+skipped the gap row, `test_rolling_mean_excludes_today` checked one row behind
+an `if`, and nothing tested `cnt_lag_7`. All three now check **every row
+against the raw calendar**: if each day in the window exists in
+`data/raw/bike_daily.csv`, the value must match; if one is missing, the row
+must not exist. New: `test_lag_7_is_seven_calendar_days`.
+
+Red runs, with each fault applied **in memory** (a patched module, `src/`
+never written), against the old file (`git show HEAD:tests/test_leakage.py`
+before this change) and the new one. (a) is fault 5, `reindex_to_calendar`
+removed; (b) is `cnt_lag_7 = shift(LAG_WARMUP)` with `LAG_WARMUP = 28`:
+
+```text
+=== fault a, test_leakage_OLD.py
+FAILED ::test_roll_28_respects_the_calendar_gap - AssertionError: 28 rows kep...
+1 failed, 9 passed in 0.20s
+=== fault a, test_leakage.py
+FAILED tests/test_leakage.py::test_lags_are_true_calendar_lags - AssertionErr...
+FAILED tests/test_leakage.py::test_lag_7_is_seven_calendar_days - AssertionEr...
+FAILED tests/test_leakage.py::test_rolling_mean_excludes_today - AssertionErr...
+FAILED tests/test_leakage.py::test_roll_28_respects_the_calendar_gap - Assert...
+4 failed, 7 passed in 0.24s
+=== fault b, test_leakage_OLD.py
+10 passed in 0.07s
+=== fault b, test_leakage.py
+FAILED tests/test_leakage.py::test_lag_7_is_seven_calendar_days - AssertionEr...
+1 failed, 10 passed in 0.22s
+=== fault a, new tests: assertion messages
+E           AssertionError: cnt_lag_1 kept at 2011-03-11 though [datetime.date(2011, 3, 10)] is absent
+E           AssertionError: bad cnt_lag_7 at 2011-03-11
+E           AssertionError: cnt_roll_7 kept at 2011-03-11 though [datetime.date(2011, 3, 10)] is absent
+E       AssertionError: 28 rows kept whose window spans 2011-03-10
+=== fault b, new tests: assertion messages
+E           AssertionError: bad cnt_lag_7 at 2011-01-31
+```
+
+Under (b) the old suite was entirely green; under (a) it had one red test,
+and that one only because `cnt_roll_28` was added in Exercise 1. On correct
+code: `24 passed`.

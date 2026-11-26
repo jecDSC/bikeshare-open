@@ -31,30 +31,50 @@ def test_no_forbidden_features(feats):
     assert not (cols & FORBIDDEN), f"forbidden columns in feature set: {cols & FORBIDDEN}"
 
 
-def test_lags_are_true_calendar_lags(feats):
-    """cnt_lag_1 for date d must equal cnt on d-1, in calendar days."""
-    by_date = feats.set_index("dteday")[TARGET]
-    checked = 0
-    for date, lag in feats.set_index("dteday").cnt_lag_1.items():
-        prev = date - pd.Timedelta(days=1)
-        if prev in by_date.index:
-            assert lag == pytest.approx(by_date[prev]), f"bad lag at {date.date()}"
-            checked += 1
-    assert checked > 600, "too few rows actually verified"
+@pytest.fixture(scope="module")
+def raw_cnt():
+    """The target by date, straight from the raw file: the reference every
+    lag is checked against, so a row the feature table kept by mistake
+    cannot vouch for itself."""
+    return load_raw().set_index("dteday")[TARGET]
+
+
+def _assert_calendar_window(feats, raw_cnt, column, days, aggregate):
+    """For every row d: if all of `days` (offsets before d) exist in the raw
+    calendar, `column` must equal `aggregate` of their counts; if any is
+    missing, the row should have been dropped and must not exist."""
+    for date, value in feats.set_index("dteday")[column].items():
+        window = [date - pd.Timedelta(days=k) for k in days]
+        missing = [d.date() for d in window if d not in raw_cnt.index]
+        assert not missing, f"{column} kept at {date.date()} though {missing} is absent"
+        expected = aggregate([raw_cnt[d] for d in window])
+        assert value == pytest.approx(expected), f"bad {column} at {date.date()}"
+
+
+def test_lags_are_true_calendar_lags(feats, raw_cnt):
+    """cnt_lag_1 for date d must equal cnt on d-1, in calendar days, on every
+    row. Checked against the raw calendar: the old version compared with the
+    feature table and skipped any row whose d-1 was not in it, which is
+    exactly the row (2011-03-11) that goes wrong without the reindex."""
+    _assert_calendar_window(feats, raw_cnt, "cnt_lag_1", [1], lambda v: v[0])
 
 
 def test_lag_is_not_the_target(feats):
     assert not (feats.cnt_lag_1 == feats[TARGET]).all()
 
 
-def test_rolling_mean_excludes_today(feats):
-    """cnt_roll_7 must be the mean of the 7 calendar days *before* today."""
-    by_date = feats.set_index("dteday")[TARGET]
-    date = feats.dteday.iloc[200]
-    window = [date - pd.Timedelta(days=k) for k in range(1, 8)]
-    if all(d in by_date.index for d in window):
-        expected = sum(by_date[d] for d in window) / 7
-        assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
+def test_lag_7_is_seven_calendar_days(feats, raw_cnt):
+    """cnt_lag_7 for date d must equal cnt on d-7. Nothing tested it before:
+    making it shift(LAG_WARMUP) turned it into a 28-day lag with every test
+    green (docs/DECISIONS.md, Exercise 1)."""
+    _assert_calendar_window(feats, raw_cnt, "cnt_lag_7", [7], lambda v: v[0])
+
+
+def test_rolling_mean_excludes_today(feats, raw_cnt):
+    """cnt_roll_7 must be the mean of the 7 calendar days *before* today, on
+    every row. The old version checked one row behind an `if`, so a row
+    whose window touched a gap would have asserted nothing."""
+    _assert_calendar_window(feats, raw_cnt, "cnt_roll_7", range(1, 8), lambda v: sum(v) / 7)
 
 
 def test_roll_28_on_named_date(feats):
