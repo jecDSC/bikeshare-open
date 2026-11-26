@@ -1,0 +1,2 @@
+# Hook scripts run under bash; CRLF line endings break them on Windows checkouts.
+*.sh text eol=lf
