@@ -175,3 +175,113 @@ JSON escaping made the hook exit **0**: the inline `json.load` crashed,
 fails open on a malformed payload. Claude Code always sends valid JSON, so
 this does not affect live use, but it means "the hook was silent" is only
 evidence of green tests when the payload is known to be good.
+
+## 2. The `.shift(1)` deleted from `cnt_roll_7`
+
+**The change** (seeded by the agent):
+
+```diff
+diff --git a/src/features.py b/src/features.py
+index df9b4cf..5f969ac 100644
+--- a/src/features.py
++++ b/src/features.py
+@@ -78,7 +78,7 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
+     # If you add a longer lag, raise LAG_WARMUP in src/config.py.
+     out["cnt_lag_1"] = out[TARGET].shift(1)
+     out["cnt_lag_7"] = out[TARGET].shift(WEEK)
+-    out["cnt_roll_7"] = out[TARGET].shift(1).rolling(WEEK).mean()
++    out["cnt_roll_7"] = out[TARGET].rolling(WEEK).mean()
+     # Four-week level: smooths the weekly cycle that cnt_roll_7 still carries.
+     out["cnt_roll_28"] = out[TARGET].shift(1).rolling(FOUR_WEEKS).mean()
+     assert FOUR_WEEKS <= LAG_WARMUP, "raise LAG_WARMUP in src/config.py"
+```
+
+**Hook stderr** (exit code 2; pytest wrote it in cp1252, decoded here so
+`±` survives):
+
+```text
+Leakage tests failed after editing C:/Users/jerem/Documents/GitHub/bikeshare-open/src/features.py:
+[672 rows x 29 columns]
+
+    def test_rolling_mean_excludes_today(feats):
+        """cnt_roll_7 must be the mean of the 7 calendar days *before* today."""
+        by_date = feats.set_index("dteday")[TARGET]
+        date = feats.dteday.iloc[200]
+        window = [date - pd.Timedelta(days=k) for k in range(1, 8)]
+        if all(d in by_date.index for d in window):
+            expected = sum(by_date[d] for d in window) / 7
+>           assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
+E           assert np.float64(4605.285714285715) == 4724.428571428572 ± 0.00472443
+E             
+E             comparison failed
+E             Obtained: 4605.285714285715
+E             Expected: 4724.428571428572 ± 0.00472443
+
+tests\test_leakage.py:57: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_leakage.py::test_rolling_mean_excludes_today - assert np.fl...
+1 failed, 8 passed in 0.55s
+```
+
+**`make test`:**
+
+```text
+python -m pytest tests/ -q
+.........F.......                                                        [100%]
+================================== FAILURES ===================================
+______________________ test_rolling_mean_excludes_today _______________________
+
+feats =         dteday  instant  season  ...  cnt_lag_7   cnt_roll_7  cnt_roll_28
+0   2011-01-31     31.0  WINTER  ...     141....428571  4071.321429
+671 2012-12-31    731.0  WINTER  ...      920.0  1789.857143  3969.428571
+
+[672 rows x 29 columns]
+
+    def test_rolling_mean_excludes_today(feats):
+        """cnt_roll_7 must be the mean of the 7 calendar days *before* today."""
+        by_date = feats.set_index("dteday")[TARGET]
+        date = feats.dteday.iloc[200]
+        window = [date - pd.Timedelta(days=k) for k in range(1, 8)]
+        if all(d in by_date.index for d in window):
+            expected = sum(by_date[d] for d in window) / 7
+>           assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
+E           assert np.float64(4605.285714285715) == 4724.428571428572 ± 0.00472443
+E             
+E             comparison failed
+E             Obtained: 4605.285714285715
+E             Expected: 4724.428571428572 ± 0.00472443
+
+tests\test_leakage.py:57: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_leakage.py::test_rolling_mean_excludes_today - assert np.fl...
+1 failed, 16 passed in 1.40s
+make: *** [Makefile:16: test] Error 1
+```
+
+**What the leak would have been worth** (seeded state, features built in
+memory, validation only, test split discarded):
+
+```text
+seeded fault 2, ridge: valid R2 0.7541, MAE 680.3
+seeded fault 2, hgb: valid R2 0.2962, MAE 1211.2
+```
+
+Honest pipeline: ridge 0.6839 / MAE 777.5, hgb 0.2415 / MAE 1296.6. Today's
+count inside its own rolling mean lifts ridge by +0.07 validation R^2, the
+kind of gain that would be kept on sight without the test.
+
+**Fix: 4 turns** (fresh subagent: 1 read/search, 2 Bash runs, 1 edit). It
+identified the cause unprompted ("the 7-day rolling mean included today's
+`cnt`. That leaks the target") and restored `.shift(1)`. `git diff src/`
+empty afterwards; `make test`: `17 passed in 1.20s`.
+
+**What caught it:** the hook, on the seeding edit, and
+`test_rolling_mean_excludes_today` in `make test`. `cnt_roll_28`'s own test
+(`test_roll_28_on_named_date`) stayed green, correctly: that feature still
+shifts.
+
+**Weakness noticed.** `test_rolling_mean_excludes_today` checks one row
+(`feats.dteday.iloc[200]`) and wraps its assert in
+`if all(d in by_date.index for d in window):`. If that row's window ever
+touched a gap, the test would assert nothing and still pass. It caught this
+fault, but only because row 200 happens to have a complete window.
