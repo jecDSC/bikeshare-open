@@ -698,3 +698,116 @@ $ make test
 
 **Turns:** none for the agent to fix, by design: the guard does not repair
 bad data, it refuses it. Restoring took one human command.
+
+## 5. The `reindex_to_calendar` call removed from `build_features`
+
+First run of the `seed-fault` skill (`.claude/skills/seed-fault/SKILL.md`),
+invoked as `/seed-fault remove the reindex_to_calendar call from build_features`.
+This is the lesson's Bug 1 put back.
+
+**The change:**
+
+```diff
+diff --git a/src/features.py b/src/features.py
+index df9b4cf..d872818 100644
+--- a/src/features.py
++++ b/src/features.py
+@@ -56,7 +56,7 @@ def reindex_to_calendar(df: pd.DataFrame) -> pd.DataFrame:
+ 
+ 
+ def build_features(df: pd.DataFrame) -> pd.DataFrame:
+-    out = reindex_to_calendar(df.sort_values("dteday").reset_index(drop=True)).copy()
++    out = df.sort_values("dteday").reset_index(drop=True).copy()
+ 
+     # --- Calendar: known in advance, so it cannot leak -------------------
+     out["dayofweek"] = out.dteday.dt.dayofweek
+```
+
+**Prediction** (written before seeding): `test_lags_are_true_calendar_lags`
+and `test_roll_28_respects_the_calendar_gap` go red, so the hook exits 2;
+`test_calendar_is_complete_before_lagging` and
+`test_only_expected_rows_are_dropped` stay green. **Half right.** The gap
+test went red; the lag test stayed green. It skips every date whose calendar
+day d-1 is not in the table, and 2011-03-11, the one row whose `cnt_lag_1` is
+wrong (it holds 2011-03-09's count), is exactly such a date. The starter's
+calendar-lag test cannot see the bug it was written for. The row-loss test
+stayed green as predicted: without the reindex only 28 rows are lost
+(700 left), under the 56-row upper bound.
+
+**Hook** (re-run with the real payload):
+
+```text
+Leakage tests failed after editing C:/Users/jerem/Documents/GitHub/bikeshare-open/src/features.py:
+0         31 2011-01-31  WINTER  ...     141....142857  4071.321429
+699      731 2012-12-31  WINTER  ...      920.0  1531.428571  3969.428571
+
+[700 rows x 29 columns]
+
+    def test_roll_28_respects_the_calendar_gap(feats):
+        """2011-03-10 is absent, so every day whose 28-day window contains it
+        (2011-03-11 .. 2011-04-07) has no complete history and must be dropped.
+        A rolling mean built on rows instead of calendar days would keep them."""
+        assert "cnt_roll_28" in feats.columns, "cnt_roll_28 not built"
+        blind = pd.date_range("2011-03-11", "2011-04-07", freq="D")
+        kept = sorted(set(feats.dteday) & set(blind))
+>       assert not kept, f"{len(kept)} rows kept whose window spans 2011-03-10"
+E       AssertionError: 28 rows kept whose window spans 2011-03-10
+E       assert not [Timestamp('2011-03-11 00:00:00'), Timestamp('2011-03-12 00:00:00'), Timestamp('2011-03-13 00:00:00'), Timestamp('2011-03-14 00:00:00'), Timestamp('2011-03-15 00:00:00'), Timestamp('2011-03-16 00:00:00'), ...]
+
+tests\test_leakage.py:81: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_leakage.py::test_roll_28_respects_the_calendar_gap - Assert...
+1 failed, 9 passed in 0.55s
+hook exit: 2
+```
+
+**`make test`:**
+
+```text
+python -m pytest tests/ -q
+................F......                                                  [100%]
+================================== FAILURES ===================================
+___________________ test_roll_28_respects_the_calendar_gap ____________________
+
+feats =      instant     dteday  season  ...  cnt_lag_7   cnt_roll_7  cnt_roll_28
+0         31 2011-01-31  WINTER  ...     141....142857  4071.321429
+699      731 2012-12-31  WINTER  ...      920.0  1531.428571  3969.428571
+
+[700 rows x 29 columns]
+
+    def test_roll_28_respects_the_calendar_gap(feats):
+        """2011-03-10 is absent, so every day whose 28-day window contains it
+        (2011-03-11 .. 2011-04-07) has no complete history and must be dropped.
+        A rolling mean built on rows instead of calendar days would keep them."""
+        assert "cnt_roll_28" in feats.columns, "cnt_roll_28 not built"
+        blind = pd.date_range("2011-03-11", "2011-04-07", freq="D")
+        kept = sorted(set(feats.dteday) & set(blind))
+>       assert not kept, f"{len(kept)} rows kept whose window spans 2011-03-10"
+E       AssertionError: 28 rows kept whose window spans 2011-03-10
+E       assert not [Timestamp('2011-03-11 00:00:00'), Timestamp('2011-03-12 00:00:00'), Timestamp('2011-03-13 00:00:00'), Timestamp('2011-03-14 00:00:00'), Timestamp('2011-03-15 00:00:00'), Timestamp('2011-03-16 00:00:00'), ...]
+
+tests\test_leakage.py:81: AssertionError
+=========================== short test summary info ===========================
+FAILED tests/test_leakage.py::test_roll_28_respects_the_calendar_gap - Assert...
+1 failed, 22 passed in 1.42s
+make: *** [Makefile:16: test] Error 1
+```
+
+**Fix: 4 turns** (fresh subagent: 1 read, 2 Bash runs, 1 edit; its report
+said "5 in total" but listed four, and the harness counted 4 tool uses). Its
+cause: "dropped the `reindex_to_calendar(...)` call, so the lag and rolling
+features were computed over rows instead of calendar days". Exact revert: yes.
+
+```text
+$ git diff src/   (empty = exact revert)
+$ make test
+23 passed in 1.18s
+$ git status --short data/   (empty = untouched)
+```
+
+**What caught it:** the hook and `make test`, through
+`test_roll_28_respects_the_calendar_gap` only, the test written with
+`cnt_roll_28` in Exercise 1. Without it, removing the reindex would have
+passed every test. Proposed (not written): make `test_lags_are_true_calendar_lags`
+compare against the raw calendar (`load_raw()`), not the feature table, so
+2011-03-11 must be either dropped or correct.
