@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from src.config import FORBIDDEN, TARGET
-from src.features import build_features, feature_columns
+from src.features import build_features, encode_weather, feature_columns
 from src.ingest import load_raw
 
 
@@ -79,6 +79,17 @@ def test_roll_28_respects_the_calendar_gap(feats):
     blind = pd.date_range("2011-03-11", "2011-04-07", freq="D")
     kept = sorted(set(feats.dteday) & set(blind))
     assert not kept, f"{len(kept)} rows kept whose window spans 2011-03-10"
+
+
+def test_encode_weather_rejects_unknown_labels():
+    """The raw data has no unknown labels, so nothing else in the suite ever
+    exercises the encoder's raise: delete it and every other test stays
+    green, until a new label arrives and its days vanish in dropna(). The
+    NaN is a reindexed calendar gap and must not trigger the error."""
+    known = encode_weather(pd.Series(["GOOD", "MISTY", "BAD", None]))
+    assert known.iloc[:3].tolist() == [0.0, 1.0, 2.0] and known.isna().iloc[3]
+    with pytest.raises(ValueError, match="SNOW"):
+        encode_weather(pd.Series(["GOOD", "SNOW", None]))
 
 
 def test_no_missing_values(feats):

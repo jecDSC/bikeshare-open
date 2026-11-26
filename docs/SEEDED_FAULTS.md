@@ -285,3 +285,153 @@ shifts.
 `if all(d in by_date.index for d in window):`. If that row's window ever
 touched a gap, the test would assert nothing and still pass. It caught this
 fault, but only because row 200 happens to have a complete window.
+
+## 3. The `raise` removed from `encode_weather`
+
+**The change** (seeded by the agent, identical in both runs below):
+
+```diff
+diff --git a/src/features.py b/src/features.py
+index df9b4cf..9dc5dfb 100644
+--- a/src/features.py
++++ b/src/features.py
+@@ -31,8 +31,6 @@ def encode_weather(series: pd.Series) -> pd.Series:
+     """
+     known = series.dropna()
+     unknown = set(known.unique()) - set(WEATHER_ORDER)
+-    if unknown:
+-        raise ValueError(f"unmapped weather labels: {sorted(unknown)}")
+     return series.map(WEATHER_ORDER).astype(float)
+ 
+ 
+```
+
+### Run (a): the starter's suite cannot see it
+
+Hook result for the seeding edit (re-run with the same payload):
+
+```text
+hook exit code: 0
+hook stderr bytes: 0
+```
+
+**`make test`:**
+
+```text
+python -m pytest tests/ -q
+.................                                                        [100%]
+17 passed in 1.20s
+```
+
+Green. The raise only fires on a label outside `WEATHER_ORDER`, and the raw
+data has none, so no test ever executes it. This is the lesson's own Bug 2
+waiting to happen again: the day the mirror adds a label, every such day
+maps to NaN and `dropna()` deletes it without a word. (`test_only_expected_rows_are_dropped`
+would then go red in `make test`, but only *after* bad data arrives, and the
+hook does not run `tests/test_contract.py`.)
+
+### The fix to the suite: a test for the guard itself
+
+Code reverted exactly (`git diff src/` empty), then this test added to
+`tests/test_leakage.py`, where the hook runs it. It passed on correct code
+(`18 passed`) before the fault was seeded again:
+
+```diff
+diff --git a/tests/test_leakage.py b/tests/test_leakage.py
+index 6b37639..ec4d287 100644
+--- a/tests/test_leakage.py
++++ b/tests/test_leakage.py
+@@ -8,7 +8,7 @@ import pandas as pd
+ import pytest
+ 
+ from src.config import FORBIDDEN, TARGET
+-from src.features import build_features, feature_columns
++from src.features import build_features, encode_weather, feature_columns
+ from src.ingest import load_raw
+ 
+ 
+@@ -81,6 +81,17 @@ def test_roll_28_respects_the_calendar_gap(feats):
+     assert not kept, f"{len(kept)} rows kept whose window spans 2011-03-10"
+ 
+ 
++def test_encode_weather_rejects_unknown_labels():
++    """The raw data has no unknown labels, so nothing else in the suite ever
++    exercises the encoder's raise: delete it and every other test stays
++    green, until a new label arrives and its days vanish in dropna(). The
++    NaN is a reindexed calendar gap and must not trigger the error."""
++    known = encode_weather(pd.Series(["GOOD", "MISTY", "BAD", None]))
++    assert known.iloc[:3].tolist() == [0.0, 1.0, 2.0] and known.isna().iloc[3]
++    with pytest.raises(ValueError, match="SNOW"):
++        encode_weather(pd.Series(["GOOD", "SNOW", None]))
++
++
+ def test_no_missing_values(feats):
+     assert feats[feature_columns(feats)].isna().sum().sum() == 0
+ 
+```
+
+### Run (b): the same fault, seeded again
+
+**Hook stderr** (exit code 2):
+
+```text
+Leakage tests failed after editing C:/Users/jerem/Documents/GitHub/bikeshare-open/src/features.py:
+.......F..                                                               [100%]
+================================== FAILURES ===================================
+_________________ test_encode_weather_rejects_unknown_labels __________________
+
+    def test_encode_weather_rejects_unknown_labels():
+        """The raw data has no unknown labels, so nothing else in the suite ever
+        exercises the encoder's raise: delete it and every other test stays
+        green, until a new label arrives and its days vanish in dropna(). The
+        NaN is a reindexed calendar gap and must not trigger the error."""
+        known = encode_weather(pd.Series(["GOOD", "MISTY", "BAD", None]))
+        assert known.iloc[:3].tolist() == [0.0, 1.0, 2.0] and known.isna().iloc[3]
+>       with pytest.raises(ValueError, match="SNOW"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests\test_leakage.py:91: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_leakage.py::test_encode_weather_rejects_unknown_labels - Fa...
+1 failed, 9 passed in 0.52s
+```
+
+**`make test`:**
+
+```text
+python -m pytest tests/ -q
+............F.....                                                       [100%]
+================================== FAILURES ===================================
+_________________ test_encode_weather_rejects_unknown_labels __________________
+
+    def test_encode_weather_rejects_unknown_labels():
+        """The raw data has no unknown labels, so nothing else in the suite ever
+        exercises the encoder's raise: delete it and every other test stays
+        green, until a new label arrives and its days vanish in dropna(). The
+        NaN is a reindexed calendar gap and must not trigger the error."""
+        known = encode_weather(pd.Series(["GOOD", "MISTY", "BAD", None]))
+        assert known.iloc[:3].tolist() == [0.0, 1.0, 2.0] and known.isna().iloc[3]
+>       with pytest.raises(ValueError, match="SNOW"):
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E       Failed: DID NOT RAISE ValueError
+
+tests\test_leakage.py:91: Failed
+=========================== short test summary info ===========================
+FAILED tests/test_leakage.py::test_encode_weather_rejects_unknown_labels - Fa...
+1 failed, 17 passed in 1.38s
+make: *** [Makefile:16: test] Error 1
+```
+
+**Fix: 5 turns** (fresh subagent: 1 read/search, 3 Bash runs, 1 edit; it
+noted its one Read came after the edit and added nothing). It named the
+cause ("labels other than GOOD/MISTY/BAD ... became NaN silently instead of
+raising `ValueError`") and restored the two lines. `git diff src/` empty
+afterwards; `make test`: `18 passed in 1.10s`. It left the then-uncommitted
+test untouched, as instructed.
+
+**What caught it:** in run (a), nothing: hook exit 0, `make test` green.
+In run (b), the hook on the seeding edit and
+`test_encode_weather_rejects_unknown_labels` in `make test`. Lesson: a guard
+that the data never triggers needs a test that triggers it on purpose, or
+deleting it is invisible.
