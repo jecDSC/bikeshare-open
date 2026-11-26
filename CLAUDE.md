@@ -4,11 +4,14 @@ Daily Capital Bikeshare counts, 2011-2012. We forecast `cnt` (total daily
 rides) from calendar, weather, and lagged-demand features.
 
 ## Commands
-- `make data` - download raw CSV and assert its shape
+- `make data` - download raw CSV and assert its shape and sha256
 - `make features` - build `data/processed/features.parquet`
-- `make train` - fit models, write `reports/metrics.json`
+- `make train` - fit models, write `reports/metrics.json`. It prints test
+  scores too: while iterating, send its stdout to a file and read `valid` only.
 - `make test` - pytest; run this before claiming anything works
-- `make all` - the three pipeline stages in order
+- `make all` - the three stages in order; reproduces `reports/metrics.json`
+- `python -m src.train --target ratio28 --valid-only` - Exercise 4, validation
+  only; writes `reports/metrics_target_ratio28.json`, never `metrics.json`.
 
 ## Non-negotiable rules
 - **Never** put `casual` or `registered` in a feature set:
@@ -19,10 +22,22 @@ rides) from calendar, weather, and lagged-demand features.
   Train = 2011, valid = H1 2012, test = H2 2012. Never tune on test.
 - Any new lag or rolling feature must be built on a gap-free calendar
   index (`src.features.reindex_to_calendar`) and must `.shift(1)` before
-  it aggregates. Add a test for it in `tests/test_leakage.py`.
+  it aggregates. Name its window in `src/features.py`; `LAG_WARMUP` is only
+  the row-loss bound (= the longest window), never a window. Test every
+  row against the raw calendar in `tests/test_leakage.py`.
 - Report the mean baseline **and** the persistence baseline (yesterday's
   count) alongside every model. A negative R^2 is a finding, not a bug
   to hide.
+- **Never** write to `data/raw/`; `load_raw()` rejects any sha256 but
+  `RAW_SHA256`. Restore the file from git; never edit the hash to match.
+- Every raw column must be classified in `src/config.py`: in `FORBIDDEN`
+  with its reason, or in `FEATURE_SOURCES`. Classifying a new column is a
+  decision for `docs/DECISIONS.md`, not a way to make the test pass.
+
+## Workflows
+- `/new-feature <name>` for any new predictor; `/seed-fault <description>`
+  to break `src/` on purpose and record what catches it.
+- One dated line per methodological decision in `docs/DECISIONS.md`.
 
 ## Style
 - Standard library, pandas, scikit-learn only. No new dependencies
@@ -39,3 +54,5 @@ rides) from calendar, weather, and lagged-demand features.
   cannot extrapolate to 2012. That is the headline result, not an error.
 - 2012-10-29 (Hurricane Sandy, 22 rides) is in the test set. Expect it in
   any residual plot.
+- Windows Git Bash drops `.venv\Scripts` from PATH, so `python` is the
+  system one without pandas. Prefix: `export PATH="$PWD/.venv/Scripts:$PATH";`
