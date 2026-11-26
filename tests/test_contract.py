@@ -31,10 +31,11 @@ def test_only_expected_rows_are_dropped(raw, feats):
 
     Accounting: the first LAG_WARMUP days have no complete history. Each
     absent calendar day m costs the LAG_WARMUP rows after it (cnt_lag_1 is
-    NaN on m+1, cnt_roll_7 is NaN on m+1..m+7, cnt_lag_7 on m+7; their
-    union is 7 rows). Day m itself was never in `raw`, so it is not a loss.
-    The bound is exact for the current feature set; add a longer lag and
-    LAG_WARMUP in src/config.py must grow with it.
+    NaN on m+1, cnt_lag_7 on m+7, cnt_roll_7 on m+1..m+7, cnt_roll_28 on
+    m+1..m+28; their union is 28 rows). Day m itself was never in `raw`, so
+    it is not a loss. With LAG_WARMUP = 28 and one absent day (2011-03-10):
+    28 + 28 * 1 = 56, so 728 raw rows -> 672. The bound is exact for the
+    current feature set; add a longer lag and LAG_WARMUP must grow with it.
     """
     full = pd.date_range(raw.dteday.min(), raw.dteday.max(), freq="D")
     missing_days = len(full) - len(raw)

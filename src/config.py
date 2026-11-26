@@ -49,7 +49,8 @@ FORBIDDEN = LEAKAGE_COLS | TIME_INDEX_COLS | UNVERIFIED_COLS
 TRAIN_END = "2011-12-31"
 VALID_END = "2012-06-30"
 
-# Longest lag window in src/features.py. The first LAG_WARMUP calendar days
-# have no complete history and are dropped; tests/test_contract.py uses this
-# to bound how many rows may legitimately disappear.
-LAG_WARMUP = 7
+# Longest lag window in src/features.py (cnt_roll_28). The first LAG_WARMUP
+# calendar days have no complete history and are dropped; tests/test_contract.py
+# uses this to bound how many rows may legitimately disappear. It is a bound,
+# not a window length: features.py names each window itself.
+LAG_WARMUP = 28

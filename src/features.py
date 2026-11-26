@@ -15,6 +15,11 @@ from src.ingest import load_raw
 
 WEATHER_ORDER = {"GOOD": 0, "MISTY": 1, "BAD": 2}
 
+# Lag windows, in calendar days. Deliberately NOT LAG_WARMUP: that is the
+# row-loss bound and must equal the longest of these, not stand in for them.
+WEEK = 7
+FOUR_WEEKS = 28
+
 
 def encode_weather(series: pd.Series) -> pd.Series:
     """Ordinal-encode weather, failing loudly on unseen labels.
@@ -72,8 +77,11 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     # without it, cnt_roll_7 would contain today's count. -----------------
     # If you add a longer lag, raise LAG_WARMUP in src/config.py.
     out["cnt_lag_1"] = out[TARGET].shift(1)
-    out["cnt_lag_7"] = out[TARGET].shift(LAG_WARMUP)
-    out["cnt_roll_7"] = out[TARGET].shift(1).rolling(LAG_WARMUP).mean()
+    out["cnt_lag_7"] = out[TARGET].shift(WEEK)
+    out["cnt_roll_7"] = out[TARGET].shift(1).rolling(WEEK).mean()
+    # Four-week level: smooths the weekly cycle that cnt_roll_7 still carries.
+    out["cnt_roll_28"] = out[TARGET].shift(1).rolling(FOUR_WEEKS).mean()
+    assert FOUR_WEEKS <= LAG_WARMUP, "raise LAG_WARMUP in src/config.py"
 
     return out.dropna().reset_index(drop=True)
 
