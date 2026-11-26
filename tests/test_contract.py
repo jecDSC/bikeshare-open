@@ -6,7 +6,7 @@ from sklearn.metrics import r2_score
 from src.config import FEATURE_SOURCES, FORBIDDEN, LAG_WARMUP, RAW, RAW_SHA256, TARGET
 from src.features import build_features, feature_columns, reindex_to_calendar
 from src.ingest import load_raw, raw_sha256
-from src.train import MODELS, temporal_split
+from src.train import MODELS, TARGET_TRANSFORMS, OnTransformedTarget, models_for, temporal_split
 
 
 @pytest.fixture(scope="module")
@@ -92,3 +92,25 @@ def test_persistence_baseline_is_reported():
     """The baseline that matters for a lag-driven model is 'yesterday again'.
     It must be in the comparison, whatever its score."""
     assert "baseline_persistence" in MODELS
+
+
+@pytest.mark.parametrize("name", sorted(TARGET_TRANSFORMS))
+def test_target_transform_round_trips_from_features_only(feats, name):
+    """Exercise 4. X is the model's feature matrix, which excludes cnt, so a
+    transform that needed today's count to map back could not run here."""
+    X = feats[feature_columns(feats)]
+    forward, inverse = TARGET_TRANSFORMS[name]
+    back = inverse(forward(feats[TARGET], X), X)
+    assert back == pytest.approx(feats[TARGET].to_numpy(dtype=float))
+
+
+def test_default_pipeline_is_untransformed():
+    """reports/metrics.json must stay the untransformed pipeline; baselines
+    are never transformed, whichever target is chosen."""
+    assert models_for("none") is MODELS
+    for name in TARGET_TRANSFORMS:
+        models = models_for(name)
+        assert models["baseline_mean"] is MODELS["baseline_mean"]
+        assert models["baseline_persistence"] is MODELS["baseline_persistence"]
+        assert isinstance(models["ridge"], OnTransformedTarget)
+        assert isinstance(models["hgb"], OnTransformedTarget)
