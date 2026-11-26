@@ -57,6 +57,30 @@ def test_rolling_mean_excludes_today(feats):
         assert feats.set_index("dteday").cnt_roll_7[date] == pytest.approx(expected)
 
 
+def test_roll_28_on_named_date(feats):
+    """cnt_roll_28 on 2012-03-15 is the mean cnt of the 28 calendar days
+    strictly before it: 2012-02-16 .. 2012-03-14, all present in the raw CSV.
+    Hand-computed from data/raw/bike_daily.csv with the csv module: those 28
+    counts sum to 115349. Including the day itself (cnt 6192) instead of
+    2012-02-16 (cnt 3005) would give 4233.71, so a missing shift(1) fails."""
+    assert "cnt_roll_28" in feats.columns, "cnt_roll_28 not built"
+    date = pd.Timestamp("2012-03-15")
+    raw = load_raw().set_index("dteday")[TARGET]
+    window = [date - pd.Timedelta(days=k) for k in range(1, 29)]
+    assert sum(raw[d] for d in window) == 115349  # the hand computation
+    assert feats.set_index("dteday").cnt_roll_28[date] == pytest.approx(115349 / 28)
+
+
+def test_roll_28_respects_the_calendar_gap(feats):
+    """2011-03-10 is absent, so every day whose 28-day window contains it
+    (2011-03-11 .. 2011-04-07) has no complete history and must be dropped.
+    A rolling mean built on rows instead of calendar days would keep them."""
+    assert "cnt_roll_28" in feats.columns, "cnt_roll_28 not built"
+    blind = pd.date_range("2011-03-11", "2011-04-07", freq="D")
+    kept = sorted(set(feats.dteday) & set(blind))
+    assert not kept, f"{len(kept)} rows kept whose window spans 2011-03-10"
+
+
 def test_no_missing_values(feats):
     assert feats[feature_columns(feats)].isna().sum().sum() == 0
 
