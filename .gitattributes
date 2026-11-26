@@ -1,2 +1,5 @@
 # Hook scripts run under bash; CRLF line endings break them on Windows checkouts.
 *.sh text eol=lf
+
+# Raw data is hashed (src/config.py RAW_SHA256): never convert its line endings.
+data/raw/** -text

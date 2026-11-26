@@ -435,3 +435,266 @@ In run (b), the hook on the seeding edit and
 `test_encode_weather_rejects_unknown_labels` in `make test`. Lesson: a guard
 that the data never triggers needs a test that triggers it on purpose, or
 deleting it is invisible.
+
+## 4. A `cp` into `data/raw/` from a shell: the fault the hook cannot see
+
+**What was done.** The agent's first attempt, a Bash command that only
+*read* from `data/raw/` (copying the CSV out to a backup), was denied in this
+session, so the fault was run by the human in PowerShell. `<notes>` is a
+scratch folder outside the repo. `tamper.py` scales one training day's
+`casual`, `registered` and `cnt` by 1.5, keeping `casual + registered == cnt`,
+so the identity test cannot notice. 2011-07-04 happens to be the 2011
+maximum, the ceiling the hgb headline depends on.
+
+```text
+PS> Copy-Item data\raw\bike_daily.csv <notes>\faults\bike_daily.BACKUP.csv
+PS> .venv\Scripts\python.exe <notes>\faults\tamper.py
+2011-07-04 casual/registered/cnt: 3065/2978/6043 -> 4598/4467/9065
+OK wrote bike_daily.TAMPERED.csv: 86325 bytes (backup 86325)
+PS> cp <notes>\faults\bike_daily.TAMPERED.csv data\raw\bike_daily.csv
+PS> (Get-FileHash data\raw\bike_daily.csv).Hash
+D138851D8CA3BC927235D6753851B30DA5C350C482FF7D93B743A55A9311194A
+```
+
+### Run (a): the starter's protections
+
+Nothing fired. The PostToolUse hook matches only `Edit|Write`; the
+`Edit(./data/raw/**)` / `Write(./data/raw/**)` deny rules bind only those
+tools; and every test still passes:
+
+```text
+$ sha256sum data/raw/bike_daily.csv
+d138851d8ca3bc927235d6753851b30da5c350c482ff7d93b743a55a9311194a *data/raw/bike_daily.csv
+$ git status --short
+ M data/raw/bike_daily.csv
+$ make data
+python -m src.ingest
+OK ingest: 728 rows, 2011-01-03 -> 2012-12-31
+(exit 0)
+$ make test
+python -m pytest tests/ -q
+..................                                                       [100%]
+18 passed in 1.58s
+(exit 0)
+```
+
+The pipeline ran on the tampered file and every model moved (validation
+only, features built in memory, test split discarded):
+
+```text
+train max cnt: 9065.0
+tampered raw, baseline_mean: valid R2 -0.6799, MAE 1872.1
+tampered raw, ridge: valid R2 0.6589, MAE 821.0
+tampered raw, hgb: valid R2 0.2882, MAE 1256.8
+```
+
+Honest values: mean -0.6894, ridge 0.6839, hgb 0.2415. One silently edited
+row costs ridge 0.025 R^2 and *gains* hgb 0.047, because the tree's ceiling
+rose from 6043 to 9065: the edit blurs exactly the result the report rests on.
+
+### What would have caught it
+
+- **The PostToolUse hook: no.** It fires on Edit/Write only, and runs only
+  `tests/test_leakage.py`.
+- **The permission deny rules: no.** They bind the agent's Edit/Write tools,
+  not Bash and not a human shell. (Here the agent's Bash read was stopped at
+  the permission prompt, but that was the session's approval mode, not a rule
+  in `settings.json`.)
+- **A Stop hook running `make test`: no, not on its own.** This edit kept
+  every invariant the suite checks: run (a) is 18 passed.
+- **A PreToolUse hook on Bash:** can refuse agent commands that name
+  `data/raw`, before they run. Prevention, but only for the agent, and a
+  regex over shell text is easy to evade (`python -c`, variables, a script).
+- **A filesystem permission** (`attrib +R` / `chmod -w data/raw`): stops a
+  casual `cp` by anyone, but is not versioned, so a fresh clone does not have it.
+- **A hash check: yes.** It does not care who changed the bytes or how.
+  Implemented below, in `load_raw()` so `make data`, `make features` and every
+  test refuse the file. `git status` also showed `M data/raw/bike_daily.csv`
+  in run (a), but only to someone who looked.
+
+### The guard (implemented)
+
+`RAW_SHA256` in `src/config.py`; `load_raw()` raises on a mismatch; two tests,
+one on the real file and one that flips a byte in a `tmp_path` copy so
+deleting the guard goes red; and `data/raw/** -text` in `.gitattributes`,
+because `core.autocrlf=true` on this machine and a CRLF checkout would
+otherwise change the hash on a Windows clone.
+
+```diff
+diff --git a/.gitattributes b/.gitattributes
+index b250910..2a29e19 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,2 +1,5 @@
+ # Hook scripts run under bash; CRLF line endings break them on Windows checkouts.
+ *.sh text eol=lf
++
++# Raw data is hashed (src/config.py RAW_SHA256): never convert its line endings.
++data/raw/** -text
+diff --git a/src/config.py b/src/config.py
+index a5f6e7f..4d607de 100644
+--- a/src/config.py
++++ b/src/config.py
+@@ -20,6 +20,13 @@ DATA_URL = (
+     "interpretable-ml-book/master/data/bike.csv"
+ )
+ 
++# Raw data is immutable. src.ingest.load_raw() refuses any file whose bytes
++# differ from these, however the change was made (an editor, a Bash `cp`,
++# a re-download from a mirror that changed). The settings.json deny rules
++# only bind the Edit/Write tools; this binds everything that reads the data.
++# .gitattributes marks data/raw/ -text so a CRLF checkout cannot break it.
++RAW_SHA256 = "a6bed1577f6e4de56dcfae6d8315985073cc0ad3446c8c99ed60c86a0b5ad9dc"
++
+ TARGET = "cnt"
+ 
+ # --- Three reasons a column is kept out of the feature set --------------
+diff --git a/src/ingest.py b/src/ingest.py
+index 6654075..690ca89 100644
+--- a/src/ingest.py
++++ b/src/ingest.py
+@@ -2,12 +2,14 @@
+ 
+ Run: python -m src.ingest
+ """
++import hashlib
+ import sys
+ import urllib.request
++from pathlib import Path
+ 
+ import pandas as pd
+ 
+-from src.config import DATA_URL, RAW
++from src.config import DATA_URL, RAW, RAW_SHA256
+ 
+ EXPECTED_MIN_ROWS = 700
+ REQUIRED_COLS = {"dteday", "cnt", "casual", "registered", "temp", "hum", "windspeed"}
+@@ -20,8 +22,19 @@ def download(force: bool = False) -> None:
+     urllib.request.urlretrieve(DATA_URL, RAW)
+ 
+ 
+-def load_raw() -> pd.DataFrame:
+-    df = pd.read_csv(RAW, parse_dates=["dteday"])
++def raw_sha256(path: Path = RAW) -> str:
++    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
++
++
++def load_raw(path: Path = RAW) -> pd.DataFrame:
++    digest = raw_sha256(path)
++    if digest != RAW_SHA256:
++        raise ValueError(
++            f"{Path(path).name} has sha256 {digest[:16]}..., expected "
++            f"{RAW_SHA256[:16]}...: raw data is immutable. Restore it from git "
++            "and make any change downstream, in code."
++        )
++    df = pd.read_csv(path, parse_dates=["dteday"])
+     missing = REQUIRED_COLS - set(df.columns)
+     if missing:
+         raise ValueError(f"raw data is missing required columns: {sorted(missing)}")
+diff --git a/tests/test_contract.py b/tests/test_contract.py
+index 0f79920..27c77c2 100644
+--- a/tests/test_contract.py
++++ b/tests/test_contract.py
+@@ -3,9 +3,9 @@ import pandas as pd
+ import pytest
+ from sklearn.metrics import r2_score
+ 
+-from src.config import FEATURE_SOURCES, FORBIDDEN, LAG_WARMUP, RAW, TARGET
++from src.config import FEATURE_SOURCES, FORBIDDEN, LAG_WARMUP, RAW, RAW_SHA256, TARGET
+ from src.features import build_features, feature_columns, reindex_to_calendar
+-from src.ingest import load_raw
++from src.ingest import load_raw, raw_sha256
+ from src.train import MODELS, temporal_split
+ 
+ 
+@@ -44,6 +44,25 @@ def test_only_expected_rows_are_dropped(raw, feats):
+     assert lost <= allowed_loss, f"lost {lost} rows; expected at most {allowed_loss}"
+ 
+ 
++def test_raw_file_is_unmodified():
++    """The permission deny rules bind only the Edit/Write tools, and the
++    PostToolUse hook fires only on them, so a `cp` into data/raw/ from Bash
++    passes both. A consistent edit (casual, registered and cnt scaled
++    together) passes every other test too. Only the bytes can tell."""
++    assert raw_sha256() == RAW_SHA256, "data/raw/bike_daily.csv was modified"
++
++
++def test_load_raw_rejects_a_modified_file(tmp_path):
++    """Tests the guard itself, so deleting the check in load_raw() goes red.
++    One byte changed in a copy under tmp_path; data/raw/ is never written."""
++    tampered = bytearray(RAW.read_bytes())
++    tampered[-2] ^= 1
++    copy = tmp_path / "bike_daily.csv"
++    copy.write_bytes(bytes(tampered))
++    with pytest.raises(ValueError, match="raw data is immutable"):
++        load_raw(copy)
++
++
+ def test_every_raw_column_is_classified():
+     """feature_columns() is a denylist, so a new numeric column in the raw
+     CSV would reach the model without anyone deciding it should. Every raw
+```
+
+### Run (b): the same tampered file, with the guard
+
+The hook fired live (exit 2) on the agent's edit to `src/ingest.py`, since
+`tests/test_leakage.py` loads the raw file. `make data`:
+
+```text
+$ sha256sum data/raw/bike_daily.csv
+d138851d8ca3bc927235d6753851b30da5c350c482ff7d93b743a55a9311194a *data/raw/bike_daily.csv
+$ make data
+    )
+ValueError: bike_daily.csv has sha256 d138851d8ca3bc92..., expected a6bed1577f6e4de5...: raw data is immutable. Restore it from git and make any change downstream, in code.
+make: *** [Makefile:7: data] Error 1
+(exit 2)
+```
+
+`make test` (excerpt: the first error line and the full summary; 384 lines in all):
+
+```text
+E           ValueError: bike_daily.csv has sha256 d138851d8ca3bc92..., expected a6bed1577f6e4de5...: raw data is immutable. Restore it from git and make any change downstream, in code.
+...
+=========================== short test summary info ===========================
+FAILED tests/test_contract.py::test_raw_file_is_unmodified - AssertionError: ...
+ERROR tests/test_contract.py::test_calendar_is_complete_before_lagging - Valu...
+ERROR tests/test_contract.py::test_only_expected_rows_are_dropped - ValueErro...
+ERROR tests/test_contract.py::test_beats_the_mean_baseline - ValueError: bike...
+ERROR tests/test_leakage.py::test_leakage_identity_holds - ValueError: bike_d...
+ERROR tests/test_leakage.py::test_no_forbidden_features - ValueError: bike_da...
+ERROR tests/test_leakage.py::test_lags_are_true_calendar_lags - ValueError: b...
+ERROR tests/test_leakage.py::test_lag_is_not_the_target - ValueError: bike_da...
+ERROR tests/test_leakage.py::test_rolling_mean_excludes_today - ValueError: b...
+ERROR tests/test_leakage.py::test_roll_28_on_named_date - ValueError: bike_da...
+ERROR tests/test_leakage.py::test_roll_28_respects_the_calendar_gap - ValueEr...
+ERROR tests/test_leakage.py::test_no_missing_values - ValueError: bike_daily....
+ERROR tests/test_leakage.py::test_dates_are_sorted_and_unique - ValueError: b...
+ERROR tests/test_split.py::test_splits_non_empty - ValueError: bike_daily.csv...
+ERROR tests/test_split.py::test_splits_are_ordered_in_time - ValueError: bike...
+ERROR tests/test_split.py::test_no_overlapping_dates - ValueError: bike_daily...
+1 failed, 4 passed, 15 errors in 1.28s
+make: *** [Makefile:16: test] Error 1
+```
+
+The four that pass do not read the raw file; one of them is
+`test_load_raw_rejects_a_modified_file`, which passes because the guard works.
+
+### Restored
+
+The human copied the backup back (`Get-FileHash` printed
+`A6BED1577F6E4DE56DCFAE6D8315985073CC0AD3446C8C99ED60C86A0B5AD9DC`):
+
+```text
+$ sha256sum data/raw/bike_daily.csv
+a6bed1577f6e4de56dcfae6d8315985073cc0ad3446c8c99ed60c86a0b5ad9dc *data/raw/bike_daily.csv
+$ git status --short data/
+$ make all
+OK ingest: 728 rows, 2011-01-03 -> 2012-12-31
+OK features: 672 rows, 15 features -> features.parquet
+$ git diff --stat reports/metrics.json   (no output: byte-identical)
+$ make test
+20 passed in 1.17s
+```
+
+**Turns:** none for the agent to fix, by design: the guard does not repair
+bad data, it refuses it. Restoring took one human command.

@@ -20,6 +20,13 @@ DATA_URL = (
     "interpretable-ml-book/master/data/bike.csv"
 )
 
+# Raw data is immutable. src.ingest.load_raw() refuses any file whose bytes
+# differ from these, however the change was made (an editor, a Bash `cp`,
+# a re-download from a mirror that changed). The settings.json deny rules
+# only bind the Edit/Write tools; this binds everything that reads the data.
+# .gitattributes marks data/raw/ -text so a CRLF checkout cannot break it.
+RAW_SHA256 = "a6bed1577f6e4de56dcfae6d8315985073cc0ad3446c8c99ed60c86a0b5ad9dc"
+
 TARGET = "cnt"
 
 # --- Three reasons a column is kept out of the feature set --------------

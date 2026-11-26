@@ -3,9 +3,9 @@ import pandas as pd
 import pytest
 from sklearn.metrics import r2_score
 
-from src.config import FEATURE_SOURCES, FORBIDDEN, LAG_WARMUP, RAW, TARGET
+from src.config import FEATURE_SOURCES, FORBIDDEN, LAG_WARMUP, RAW, RAW_SHA256, TARGET
 from src.features import build_features, feature_columns, reindex_to_calendar
-from src.ingest import load_raw
+from src.ingest import load_raw, raw_sha256
 from src.train import MODELS, temporal_split
 
 
@@ -42,6 +42,25 @@ def test_only_expected_rows_are_dropped(raw, feats):
     allowed_loss = LAG_WARMUP + LAG_WARMUP * missing_days
     lost = len(raw) - len(feats)
     assert lost <= allowed_loss, f"lost {lost} rows; expected at most {allowed_loss}"
+
+
+def test_raw_file_is_unmodified():
+    """The permission deny rules bind only the Edit/Write tools, and the
+    PostToolUse hook fires only on them, so a `cp` into data/raw/ from Bash
+    passes both. A consistent edit (casual, registered and cnt scaled
+    together) passes every other test too. Only the bytes can tell."""
+    assert raw_sha256() == RAW_SHA256, "data/raw/bike_daily.csv was modified"
+
+
+def test_load_raw_rejects_a_modified_file(tmp_path):
+    """Tests the guard itself, so deleting the check in load_raw() goes red.
+    One byte changed in a copy under tmp_path; data/raw/ is never written."""
+    tampered = bytearray(RAW.read_bytes())
+    tampered[-2] ^= 1
+    copy = tmp_path / "bike_daily.csv"
+    copy.write_bytes(bytes(tampered))
+    with pytest.raises(ValueError, match="raw data is immutable"):
+        load_raw(copy)
 
 
 def test_every_raw_column_is_classified():
